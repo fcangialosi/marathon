@@ -102,7 +102,7 @@ class Stream(object):
         info('Requesting initial manifest...')
         r = requests.get(mpd_url, verify=False)
         if r.status_code < 200 or r.status_code >= 300:
-            warn('Cannot GET MPD. Server returned {}'.format(r.status))
+            error('Cannot GET MPD. Server returned {}'.format(r.status_code))
             return None
         xml.etree.ElementTree.register_namespace('', ns['mpd'])
         mpd = xml.etree.ElementTree.fromstring(r.text)
