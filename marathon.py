@@ -26,6 +26,25 @@ def warn(msg):
 def info(msg):
     sys.stdout.write("[{}] {}\n".format(colored('info', 'green'), msg)) 
 
+class Chunk(object):
+    def __init__(self, start, duration):
+        self.start = start
+        self.duration = duration
+        self.num = -1
+
+    def __eq__(self, other):
+        if not isinstance(other, Chunk):
+            return False
+        else:
+            return self.start == other.start and self.duration == other.duration
+
+    def __str__(self):
+        return "chunk#{}(s={},d={})".format(self.num, self.start, self.duration)
+
+    def __repr__(self):
+        return self.__str__()
+
+
 class Stream(object):
     def __init__(self, args):
         self.sid = args.sid
@@ -37,43 +56,51 @@ class Stream(object):
 
         self.init_file = None
         self.chunk_queue = []
+        self.done = []
+        self.num_chunks = 0
 
         self.prepare_subdirectory()
-        self.get_manifest()
+        mpd = self.get_manifest()
+
+        start = time.strftime("%m%d%Y-%H%M")
+        self.filename = '{}+{}'.format(start, self.duration)
+        self.outfile = os.path.join(self.subdir, self.filename + '.m4v')
+        self.mp4file = os.path.join(self.subdir, self.filename + '.mp4')
+        self.mpdfile = os.path.join(self.subdir, self.filename + '.mpd')
+        
+        with open(self.mpdfile, 'wb') as f:
+            f.write(xml.etree.ElementTree.tostring(mpd))
 
     def follow(self):
 
-        if not self.get('init'):
+        if not self.get(Chunk('init', 0)):
             error('Cannot progress without init.')
- 
-        num_got = 0
-        for chunk in self.chunk_queue[:4]:
-            if self.get(chunk):
-                num_got += 1
-
-        self.chunk_queue = self.chunk_queue[4:]
 
         missing_chunks = []
-        for chunk in self.chunk_queue:
-            time.sleep(self.chunk_duration / 1000.0)
-            tries = 0
-            got = False
-            while not got:
-                tries += 1
+        num_got = 0
+
+        total_recorded = 0
+        duration_ms = self.duration * 1000 * 60
+        wait_time_ms = self.chunk_queue[0].duration
+
+        while total_recorded < duration_ms:
+            if self.chunk_queue:
+                chunk = self.chunk_queue.pop(0)
                 got = self.get(chunk)
                 if not got:
-                    if tries >= 3:
-                        warn('Failed to get chunk 3 times, skipping...')
-                        missing_chunks.append(chunk)
-                        break
-                    time.sleep(1)
-                    info('Retrying...')
-            if got:
-                num_got += 1
-
-        info('Finished downloading {} {}-ms chunks.'.format(num_got, self.chunk_duration))
+                    missing_chunks.append(chunk)
+                else:
+                    self.done.append(chunk)
+                    total_recorded += chunk.duration
+                    wait_time_ms = chunk.duration
+                    num_got += 1
+            else:
+                time.sleep(wait_time_ms / 1000.0)
+                self.get_manifest()
+ 
+        info('Finished downloading {} chunks, totaling {} minutes of video.'.format(num_got, int(total_recorded / 1000.0)))
         if len(missing_chunks) > 0:
-            info('Failed to get the following chunks: {}'.format(missing_chunks))
+            warn('Failed to get the following chunks: {}'.format(missing_chunks))
 
         info('Creating MP4...')
         Popen("MP4Box -add {} -new {}".format(self.outfile, self.mp4file), shell=True)
@@ -85,7 +112,7 @@ class Stream(object):
             os.makedirs(self.subdir)
 
     def get(self, chunk):
-        url = chunk_base.format(self.sid, chunk)
+        url = chunk_base.format(self.sid, chunk.start)
         if self.verbose:
             debug('GET {}'.format(url))
         r = requests.get(url, verify=False)
@@ -99,7 +126,6 @@ class Stream(object):
 
     def get_manifest(self):
         mpd_url = mpd_base.format(self.sid)
-        info('Requesting initial manifest...')
         r = requests.get(mpd_url, verify=False)
         if r.status_code < 200 or r.status_code >= 300:
             error('Cannot GET MPD. Server returned {}'.format(r.status_code))
@@ -134,31 +160,34 @@ class Stream(object):
         assert(len(segment_timelines) == 1)
         segment_timeline = segment_timelines[0]
 
-        segments = segment_timeline.findall('mpd:S', ns)
-        segment = segments[0]
-        segment_duration = int( segment.attrib.get('d', '0') )
-        if segment_duration == 0:
-            error('Initial segment missing duration')
-        first_segment = int( segment.attrib.get('t', '-1') )
-        if first_segment == -1:
-            warn('Segment missing start time')
-        self.chunk_duration = segment_duration
+        new_chunks = []
+        recent = self.done[-10:]
+        for segment in segment_timeline.findall('mpd:S', ns):
+            segment_start = int( segment.attrib.get('t', '-1') )
+            if segment_start == -1:
+                warn('Segment missing start time')
+                continue
+            segment_duration = int( segment.attrib.get('d', '0') )
+            if segment_duration == 0:
+                warn('Initial segment missing duration')
+                continue
+            chunk = Chunk(segment_start, segment_duration)
+            if not chunk in self.chunk_queue and not chunk in recent:
+                self.num_chunks += 1
+                chunk.num = self.num_chunks
+                self.chunk_queue.append(chunk)
+                new_chunks.append(chunk)
 
-        info('Found stream. frame_rate={} band={} mime={} timescale={} start={} chunk_duration={}'.format(
-            frame_rate, bandwidth, mime, timescale, first_segment, segment_duration
-        ))
-        
-        duration_ms = self.duration * 1000
-        for i in range(0, duration_ms, segment_duration):
-            self.chunk_queue.append(first_segment + i)
+        if verbose:
+            if new_chunks:
+                debug('{} new chunks: {}'.format(len(new_chunks), new_chunks))
 
-        self.filename = '{}-{}'.format(first_segment, self.duration)
-        self.outfile = os.path.join(self.subdir, self.filename + '.m4v')
-        self.mp4file = os.path.join(self.subdir, self.filename + '.mp4')
-        self.mpdfile = os.path.join(self.subdir, self.filename + '.mpd')
+        if not self.done:
+            info('Got manifest: frame_rate={} band={} mime={} timescale={} new={}'.format(
+                frame_rate, bandwidth, mime, timescale, new_chunks
+            ))
 
-        with open(self.mpdfile, 'wb') as f:
-            f.write(xml.etree.ElementTree.tostring(mpd))
+        return mpd
 
 def run(args):
     s = Stream(args)
