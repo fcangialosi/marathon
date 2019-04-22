@@ -9,22 +9,29 @@ import xml.etree.ElementTree
 import time
 from subprocess import Popen
 import urllib3
+from subprocess import Popen, PIPE
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+DEBUG_NAME_LEN = 20
+
+# Newark
 mpd_base = 'https://newark-tc-clients.winkcdn.com/public/dash/{}_cvp.mpd'
 ns = {'mpd' : 'urn:mpeg:dash:schema:mpd:2011'}
-
 chunk_base = 'https://newark-tc-clients.winkcdn.com/public/dash/{}_cvp-{}.m4v'
 
-def debug(msg):
-    sys.stdout.write("[{}] {}\n".format(colored('debg', 'blue'), msg)) 
-def error(msg):
-    sys.stderr.write("[{}] {}\n".format(colored('erro', 'red'), msg))
+
+def _debug(name, msg):
+    sys.stdout.write("[{}] [{}] {}\n".format(colored('debg', 'blue'), name, msg)) 
+    sys.stdout.flush()
+def _error(name, msg):
+    sys.stderr.write("[{}] [{}] {}\n".format(colored('erro', 'red'), name, msg))
     sys.exit(1)
-def warn(msg):
-    sys.stderr.write("[{}] {}\n".format(colored('warn', 'yellow'), msg))
-def info(msg):
-    sys.stdout.write("[{}] {}\n".format(colored('info', 'green'), msg)) 
+def _warn(name, msg):
+    sys.stderr.write("[{}] [{}] {}\n".format(colored('warn', 'yellow'), name, msg))
+    sys.stdout.flush()
+def _info(name, msg):
+    sys.stdout.write("[{}] [{}] {}\n".format(colored('info', 'green'), name, msg)) 
+    sys.stdout.flush()
 
 class Chunk(object):
     def __init__(self, start, duration):
@@ -44,22 +51,107 @@ class Chunk(object):
     def __repr__(self):
         return self.__str__()
 
-
 class Stream(object):
     def __init__(self, args):
         self.sid = args.sid
         self.name = args.name
+        self.debug_name = self.name[:DEBUG_NAME_LEN].ljust(DEBUG_NAME_LEN)
         self.duration = args.duration
         self.root = args.root
         self.verbose = args.verbose
         self.subdir = os.path.join(self.root, self.name)
+        self.prepare_subdirectory()
+
+    def debug(self, msg):
+        if self.verbose:
+            _debug(self.debug_name, msg)
+    def info(self, msg):
+        _info(self.debug_name, msg)
+    def warn(self, msg):
+        _warn(self.debug_name, msg)
+    def error(self, msg):
+        _error(self.debug_name, msg)
+
+    def prepare_subdirectory(self):
+        if not os.path.exists(self.subdir):
+            self.info('Creating subdirectory {}'.format(self.subdir))
+            os.makedirs(self.subdir)
+
+class ParkStream(Stream):
+    CAMERAS = {
+        'left'   : '40.132.190.147',
+        'center' : '40.132.190.148',
+        'right'  : '40.132.190.149',
+    }
+    def __init__(self, args):
+        super().__init__(args)
+
+        start = time.strftime("%m%d%Y-%H%M")
+        self.filename = '{}+{}'.format(start, self.duration)
+        self.outfile = os.path.join(self.subdir, self.filename + '.mp4')
+
+        if not self.sid in ParkStream.CAMERAS:
+            super().error("Unknown SID for Bryant Park video stream: {}".format(self.sid))
+
+    def follow(self):
+        ffmpeg = Popen("ffmpeg -i http://{}/axis-cgi/mjpg/video.cgi\?camera\=1 -map 0:v:0 -loglevel {} {}".format(
+            ParkStream.CAMERAS[self.sid],
+            'info' if self.verbose else 'error',
+            self.outfile
+        ), shell=True, stdin=PIPE)
+
+        duration_sec = self.duration * 60
+        time.sleep(duration_sec)
+
+        ffmpeg.communicate('q'.encode('utf-8'))
+        ffmpeg.wait()
+        
+
+class NYCDOTStream(Stream):
+    URL = 'http://207.251.86.238/cctv{}.jpg'
+
+    def __init__(self, args):
+        super().__init__(args)
+
+        if int(args.sid) > 999:
+            super().error("Bad SID format for NYCDOT traffic stream: {}".format(self.sid))
+        self.url = NYCDOTStream.URL.format(self.sid)
+
+        start = time.strftime("%m%d%Y-%H%M")
+        self.subdir = os.path.join(self.subdir, '{}+{}'.format(start, self.duration))
+        super().prepare_subdirectory()
+
+    def follow(self):
+
+        elapsed = 0
+        duration_sec = self.duration * 60
+
+        while elapsed < duration_sec:
+            self.get(elapsed)
+            time.sleep(1)
+            elapsed += 1
+            
+    def get(self, frame):
+        outfile = os.path.join(self.subdir, '{:04d}.jpg'.format(frame))
+        self.debug('GET {}'.format(self.url))
+        r = requests.get(self.url, verify=False)
+        if r.status_code >= 200 and r.status_code < 300:
+            with open(outfile, 'ab') as f:
+                f.write(r.content)
+            return True
+        else:
+            self.warn('Failed to download {}. Server returned {}'.format(url, r.status_code))
+            return False
+
+class NewarkStream(Stream):
+    def __init__(self, args):
+        super().__init__(args)
 
         self.init_file = None
         self.chunk_queue = []
         self.done = []
         self.num_chunks = 0
 
-        self.prepare_subdirectory()
         mpd = self.get_manifest()
 
         start = time.strftime("%m%d%Y-%H%M")
@@ -71,10 +163,11 @@ class Stream(object):
         with open(self.mpdfile, 'wb') as f:
             f.write(xml.etree.ElementTree.tostring(mpd))
 
+
     def follow(self):
 
         if not self.get(Chunk('init', 0)):
-            error('Cannot progress without init.')
+            self.error('Cannot progress without init.')
 
         missing_chunks = []
         num_got = 0
@@ -98,37 +191,31 @@ class Stream(object):
                 time.sleep(wait_time_ms / 1000.0)
                 self.get_manifest()
  
-        info('Finished downloading {} chunks, totaling {} minutes of video.'.format(num_got, int(total_recorded / 1000.0)))
+        self.info('Finished downloading {} chunks, totaling {} minutes of video.'.format(num_got, int(total_recorded / 1000.0)))
         if len(missing_chunks) > 0:
-            warn('Failed to get the following chunks: {}'.format(missing_chunks))
+            self.warn('Failed to get the following chunks: {}'.format(missing_chunks))
 
-        info('Creating MP4...')
+        self.info('Creating MP4...')
         Popen("MP4Box -add {} -new {}".format(self.outfile, self.mp4file), shell=True)
 
 
-    def prepare_subdirectory(self):
-        if not os.path.exists(self.subdir):
-            info('Creating subdirectory {}'.format(self.subdir))
-            os.makedirs(self.subdir)
-
     def get(self, chunk):
         url = chunk_base.format(self.sid, chunk.start)
-        if self.verbose:
-            debug('GET {}'.format(url))
+        self.debug('GET {}'.format(url))
         r = requests.get(url, verify=False)
         if r.status_code >= 200 and r.status_code < 300:
             with open(self.outfile, 'ab') as f:
                 f.write(r.content)
             return True
         else:
-            warn('Failed to download {}. Server returned {}'.format(url, r.status_code))
+            self.warn('Failed to download {}. Server returned {}'.format(url, r.status_code))
             return False
 
     def get_manifest(self):
         mpd_url = mpd_base.format(self.sid)
         r = requests.get(mpd_url, verify=False)
         if r.status_code < 200 or r.status_code >= 300:
-            error('Cannot GET MPD. Server returned {}'.format(r.status_code))
+            self.error('Cannot GET MPD. Server returned {}'.format(r.status_code))
             return None
         xml.etree.ElementTree.register_namespace('', ns['mpd'])
         mpd = xml.etree.ElementTree.fromstring(r.text)
@@ -153,7 +240,7 @@ class Stream(object):
         segment_template = stmps[0]
         init_file = segment_template.attrib.get('initialization', None)
         if not init_file:
-            error('No initialization file found!')
+            self.error('No initialization file found!')
         timescale = segment_template.attrib.get('timescale', 0)
 
         segment_timelines = segment_template.findall('mpd:SegmentTimeline', ns)
@@ -165,11 +252,11 @@ class Stream(object):
         for segment in segment_timeline.findall('mpd:S', ns):
             segment_start = int( segment.attrib.get('t', '-1') )
             if segment_start == -1:
-                warn('Segment missing start time')
+                self.warn('Segment missing start time')
                 continue
             segment_duration = int( segment.attrib.get('d', '0') )
             if segment_duration == 0:
-                warn('Initial segment missing duration')
+                self.warn('Initial segment missing duration')
                 continue
             chunk = Chunk(segment_start, segment_duration)
             if not chunk in self.chunk_queue and not chunk in recent:
@@ -178,26 +265,42 @@ class Stream(object):
                 self.chunk_queue.append(chunk)
                 new_chunks.append(chunk)
 
-        if verbose:
-            if new_chunks:
-                debug('{} new chunks: {}'.format(len(new_chunks), new_chunks))
+        if new_chunks:
+            self.info('{} new chunks: {}'.format(len(new_chunks), new_chunks))
 
         if not self.done:
-            info('Got manifest: frame_rate={} band={} mime={} timescale={} new={}'.format(
+            self.info('Got manifest: frame_rate={} band={} mime={} timescale={} new={}'.format(
                 frame_rate, bandwidth, mime, timescale, new_chunks
             ))
 
         return mpd
 
 def run(args):
-    s = Stream(args)
+    loc = args.location.lower()
+    if 'newark' in loc:
+        s = NewarkStream(args)
+    elif 'nyc' in loc:
+        s = NYCDOTStream(args)
+    elif 'park' in loc:
+        s = ParkStream(args)
+    else:
+        __error('parse', 'unknown location {}'.format(loc))
     
     s.follow()
 
+import textwrap
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("sid", type=str, help="Stream ID")
     parser.add_argument("--name", type=str, help="Nickname for this stream", required=True)
+    parser.add_argument("--location", type=str, help=textwrap.dedent("""Currently supported:
+    > 'Newark'
+    sid format: WF00-XXXX-XXXX-XXXX-XXXX
+    > 'NYC' (Traffic Cameras)
+    sid format: 999
+    > 'Park' (NYC's Bryant Park)
+    sid format: left, center, or right
+    """), required=True)
     parser.add_argument("--duration", type=int, help="Length of time to record in minutes", required=True)
     parser.add_argument('--root', type=str, help="Root directory", required=True)
     parser.add_argument('--verbose', action='store_true')

@@ -6,17 +6,17 @@ cameras = []
 
 with open('cameras.txt') as f:
     for l in f:
-        name, sid = l.strip().split(" ")
+        name, loc, sid = l.strip().split(" ")
         if name[0] == '#':
             continue
-        cameras.append((name, sid))
+        cameras.append((name, loc, sid))
 
 duration = int(sys.argv[1])
 
 procs= []
 for (name,sid) in cameras:
     procs.append(
-        Popen("python marathon.py {} --name {} --duration {} --root ./streams".format(sid, name, duration), shell=True)
+        Popen("python marathon.py {} --name {} --location {} --duration {} --root /streams".format(sid, name, loc, duration), shell=True)
     )
     sleep(0.5)
 
