@@ -48,3 +48,22 @@ This script can easily be run using cron to download the stream at specific time
 * Each camera is streamed on it's own ip address: 40.132.190.14{7,8,9}
 * Streams are MJPEG distributed via CGI (common gateway interface)
 * No parameters are necessary in the request, it provides the highest resolution by default
+
+## Manager
+
+The marathon script manages the download of a single video stream. The manager script is provided
+as a utility to download a list of streams in parallel by internally calling marathon.
+
+It expects a space-separated file in the local directory called cameras.txt where each line represents
+a single stream and contains 3 columns:
+{stream nickname} {location} {sid}
+
+Manager will skip any lines beginning with #.
+
+For example, to monitor camera #50 from the NYC DOT system and the center camera from bryant park:
+```
+stream1 nyc 50
+stream2 park center
+```
+
+Manager takes a single command-line argument: the length of time to download the streams in minutes.
