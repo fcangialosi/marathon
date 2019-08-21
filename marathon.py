@@ -10,6 +10,7 @@ import time
 from subprocess import Popen
 import urllib3
 from subprocess import Popen, PIPE
+from pprint import pprint
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 DEBUG_NAME_LEN = 20
@@ -107,6 +108,78 @@ class ParkStream(Stream):
         ffmpeg.wait()
         
 
+class M3U8Stream(Stream):
+
+    def __init__(self, args):
+        super().__init__(args)
+        self.url = self.sid
+        start = time.strftime("%m%d%Y-%H%M")
+        self.filename = '{}+{}'.format(start, self.duration)
+        self.outfile = os.path.join(self.subdir, self.filename + '.mpeg')
+        self.chunk_queue = []
+        super().prepare_subdirectory()
+
+    def follow(self):
+        elapsed = 0
+        num_got = 0
+        wait_time = 1
+        self.done = []
+        missing_chunks = []
+        while elapsed < self.duration * 60:
+            if self.chunk_queue:
+                chunk = self.chunk_queue.pop(0)
+                chunk_len, chunk_url = chunk
+                got = self.get(chunk_url)
+                if not got:
+                    missing_chunks.append(chunk_url)
+                else:
+                    num_got += 1
+                    self.done.append(chunk)
+                    elapsed += chunk_len
+                    wait_time = chunk_len
+            else:
+                time.sleep(wait_time)
+                self.get_manifest()
+        self.info("Finished downloading {} chunks, totaling {} minutes of video.".format(num_got, int(elapsed / 60.0)))
+        if len(missing_chunks) > 0:
+            self.warn("Failed to get the following chunks: {}".format(missing_chunks))
+
+    def get_manifest(self):
+        new_chunks = 0
+        r = requests.get(self.url, verify=False)
+        if r.status_code >= 200 and r.status_code < 300:
+            manifest = r.text
+            if not 'EXTM3U' in manifest:
+                sys.exit("ERROR: got M3U8 Manifest with unsupported extension!")
+            manifest = manifest.split("\n")
+            i = 0
+            while i < len(manifest):
+                l = manifest[i].strip()
+                if 'EXTINF:' in l:
+                    chunk_len = float(l.split(":")[1].replace(",",""))
+                else:
+                    i+=1
+                    continue
+                chunk_url = manifest[i+1]
+                i+=2
+                chunk = (chunk_len, chunk_url)
+                if not chunk in self.chunk_queue and not chunk in self.done[-10:]:
+                    self.chunk_queue.append(chunk)
+                    new_chunks += 1
+        self.info("Found {} new chunks".format(new_chunks))
+
+    def get(self, chunk):
+        self.debug('GET {}'.format(chunk))
+        r = requests.get(chunk, verify=False)
+        if r.status_code >= 200 and r.status_code < 300:
+            with open(self.outfile, 'ab') as f:
+                f.write(r.content)
+            return True
+        else:
+            self.warn('Failed to download {}. Server returned {}'.format(url, r.status_code))
+            return False
+
+
 class NYCDOTStream(Stream):
     URL = 'http://207.251.86.238/cctv{}.jpg'
 
@@ -162,6 +235,7 @@ class NewarkStream(Stream):
         
         with open(self.mpdfile, 'wb') as f:
             f.write(xml.etree.ElementTree.tostring(mpd))
+
 
 
     def follow(self):
@@ -283,6 +357,8 @@ def run(args):
         s = NYCDOTStream(args)
     elif 'park' in loc:
         s = ParkStream(args)
+    elif 'm3u8' in loc:
+        s = M3U8Stream(args)
     else:
         __error('parse', 'unknown location {}'.format(loc))
     
@@ -300,6 +376,8 @@ def main():
     sid format: 999
     > 'Park' (NYC's Bryant Park)
     sid format: left, center, or right
+    > 'm3u8' (Any M3U8 stream)
+    sid format: [url]
     """), required=True)
     parser.add_argument("--duration", type=int, help="Length of time to record in minutes", required=True)
     parser.add_argument('--root', type=str, help="Root directory", required=True)

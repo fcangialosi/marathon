@@ -2,10 +2,11 @@
 
 This repository provides a simple script to download live streams
 
-It currently supports 3 live camera systems:
+It currently supports 4 live camera systems:
 1. Newark's [Citizen Virtual Patrol](https://cvp.newarkpublicsafety.org/) (DASH Video Server)
 2. NYC DOT's Traffic Cameras (MJPEG, i.e. frames encoded as individual jpegs)
 3. Bryant Park (NYC) Camera (MJPEG, distributed via CGI)
+4. Any M3U8 video stream, e.g. those found on [Skyline Webcams](https://www.skylinewebcams.com/) (MPEG)
 
 Run `python marathon.py --help` for a list of available parameters. It also lists the SID format 
 for each camera system. As far as I know, there does not exist a publicly available list of stream
@@ -48,6 +49,14 @@ This script can easily be run using cron to download the stream at specific time
 * Each camera is streamed on it's own ip address: 40.132.190.14{7,8,9}
 * Streams are MJPEG distributed via CGI (common gateway interface)
 * No parameters are necessary in the request, it provides the highest resolution by default
+
+### M3U8 Streams
+
+* Each camera will have a unique url specific to the streaming site that can be queried to get a list of the most recent chunks, e.g. https://hddn01.skylinewebcams.com/live.m3u8?a=ID
+* This URL can be found by viewing the webcam in Chrome and monitoring the network tab of the debug tools.  
+* Sending a GET request to this URL returns a text file with a list of chunks and their length in seconds. 
+* These chunks can be downloaded sequentially and simply appended together to form a single video file
+* The extension is usually listed as ".ts" but these can be safely renamed to ".mpeg"
 
 ## Manager
 
