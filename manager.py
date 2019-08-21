@@ -14,9 +14,9 @@ with open('cameras.txt') as f:
 duration = int(sys.argv[1])
 
 procs= []
-for (name,sid) in cameras:
+for (name,loc,sid) in cameras:
     procs.append(
-        Popen("python marathon.py {} --name {} --location {} --duration {} --root /streams".format(sid, name, loc, duration), shell=True)
+        Popen("python3 marathon.py {} --name {} --location {} --duration {} --root /streams".format(sid, name, loc, duration), shell=True)
     )
     sleep(0.5)
 
