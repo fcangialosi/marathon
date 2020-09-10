@@ -92,17 +92,23 @@ class ParkStream(Stream):
         self.outfile = os.path.join(self.subdir, self.filename + '.mp4')
 
         if not self.sid in ParkStream.CAMERAS:
-            super().error("Unknown SID for Bryant Park video stream: {}".format(self.sid))
+            self.ip = self.sid
+        else:
+            self.ip = ParkStream.CAMERAS[self.sid]
+            #super().error("Unknown SID for Bryant Park video stream: {}".format(self.sid))
 
     def follow(self):
-        ffmpeg = Popen("ffmpeg -i http://{}/axis-cgi/mjpg/video.cgi\?camera\=1 -map 0:v:0 -loglevel {} {}".format(
-            ParkStream.CAMERAS[self.sid],
+        self.info("starting stream...")
+        ffmpeg = Popen("ffmpeg -i http://{}/axis-cgi/mjpg/video.cgi -map 0:v:0 -loglevel {} {}".format(
+            self.ip,
             'info' if self.verbose else 'error',
             self.outfile
         ), shell=True, stdin=PIPE)
 
         duration_sec = self.duration * 60
+        self.info("waiting...")
         time.sleep(duration_sec)
+        self.info("done")
 
         ffmpeg.communicate('q'.encode('utf-8'))
         ffmpeg.wait()
